@@ -1,11 +1,18 @@
 # Core flight scraping dependencies
-fast_flights>=1.0.0
+# Note: protobuf version must match the generated protobuf files (6.30.2)
+# We use the local flights/ directory, so we don't install fast_flights from PyPI
+protobuf>=6.30.0
+primp
+selectolax
 playwright>=1.40.0
 
 # Web API dependencies
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+sqlalchemy>=2.0.0
 
 # NLP and bot dependencies
 nltk>=3.8.0
@@ -17,6 +24,7 @@ redis>=5.0.0
 
 # Notifications (optional)
 requests>=2.31.0
+httpx>=0.25.0  # Async HTTP client
 slack-sdk>=3.27.0
 python-telegram-bot>=20.7
 
@@ -25,6 +33,7 @@ pytest>=7.4.0
 black>=23.0.0
 flake8>=6.0.0
 mypy>=1.7.0
+pandas>=2.0.0  # For CSV export in Streamlit
 
 # Optional: CAPTCHA solving
 2captcha-python>=1.2.0
@@ -36,6 +45,7 @@ sendgrid>=6.10.0
 twilio>=8.2.0
 
 # Optional: AI providers for natural language flight search
+# Note: google-generativeai conflicts with protobuf>=6.30.0, so it's excluded
+# If you need Google AI, you'll need to regenerate protobuf files with protobuf<5.0.0
 openai>=1.0.0
-google-generativeai>=0.3.0
 requests>=2.31.0  # Already included above, but needed for DeepSeek API calls

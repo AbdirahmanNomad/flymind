@@ -7,15 +7,42 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Depends, For
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any, Union
-import logging
 import json
 import os
-from datetime import datetime, date, timedelta
-import re
+from datetime import datetime, date
 import uvicorn
-from typing import Optional
+import asyncio
+from dotenv import load_dotenv
+from api.config import (
+    ENVIRONMENT, ALLOWED_ORIGINS, API_KEY, REQUIRE_API_KEY,
+    API_KEY_HEADER, RATE_LIMIT_ENABLED, RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW
+)
+from api.middleware import APIKeyMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
+from api.database import init_db, get_db, SearchHistory
+from api.models import (
+    FlightResult, SearchResponse, ErrorResponse, FlightSegment,
+    FlightSearchRequest, WebhookPayload, PriceAlertRequest,
+    PriceAlertResponse, NaturalLanguageQuery
+)
+from api.services import (
+    parse_flexible_date, convert_city_to_airport,
+    get_flights_url, send_webhook_notification
+)
+from api.logger import setup_logging, logger
+from api.cache import get_cached, set_cached, generate_cache_key
+from api.validators import (
+    validate_airport_code, validate_date_not_past, validate_date_range,
+    validate_date_reasonable_future, validate_email, validate_origin_destination,
+    validate_passenger_counts, sanitize_airport_code, sanitize_string_input
+)
+from sqlalchemy.orm import Session
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure structured logging
+setup_logging()
 
 # Optional AI functionality
 try:
@@ -130,322 +157,9 @@ def search_flights(
     except Exception as e:
         raise FlightSearchError(f"Flight search failed: {str(e)}")
 
-def get_flights_url(
-    origin: str,
-    destination: str,
-    depart_date: str,
-    return_date: Optional[str] = None,
-    adults: int = 1,
-    children: int = 0,
-    infants_in_seat: int = 0,
-    infants_on_lap: int = 0,
-    seat: str = "economy",
-    max_stops: Optional[int] = None
-) -> str:
-    """Generate Google Flights URL for search parameters"""
-    base_url = "https://www.google.com/travel/flights"
-
-    # Build search parameters
-    params = [
-        f"q=flights",
-        f"origin={origin}",
-        f"destination={destination}",
-        f"departure_date={depart_date}",
-        f"adults={adults}",
-        f"children={children}",
-        f"infants_in_seat={infants_in_seat}",
-        f"infants_on_lap={infants_on_lap}",
-        f"seat={seat}"
-    ]
-
-    if return_date:
-        params.append(f"return_date={return_date}")
-
-    if max_stops is not None:
-        if max_stops == 0:
-            params.append("stops=nonstop")
-        elif max_stops == 1:
-            params.append("stops=1")
-        elif max_stops == 2:
-            params.append("stops=2")
-
-    return f"{base_url}?{'&'.join(params)}"
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# City to airport code mapping
-CITY_TO_AIRPORT = {
-    "new york": "JFK",
-    "nyc": "JFK",
-    "los angeles": "LAX",
-    "la": "LAX",
-    "london": "LHR",
-    "paris": "CDG",
-    "tokyo": "NRT",
-    "berlin": "BER",
-    "amsterdam": "AMS",
-    "rome": "FCO",
-    "barcelona": "BCN",
-    "madrid": "MAD",
-    "vienna": "VIE",
-    "prague": "PRG",
-    "budapest": "BUD",
-    "warsaw": "WAW",
-    "stockholm": "ARN",
-    "copenhagen": "CPH",
-    "oslo": "OSL",
-    "helsinki": "HEL",
-    "dublin": "DUB",
-    "edinburgh": "EDI",
-    "manchester": "MAN",
-    "birmingham": "BHX",
-    "glasgow": "GLA",
-    "dubai": "DXB",
-    "abu dhabi": "AUH",
-    "sharjah": "SHJ",
-    "moscow": "SVO",
-    "saint petersburg": "LED",
-    "miami": "MIA",
-    "chicago": "ORD",
-    "san francisco": "SFO",
-    "seattle": "SEA",
-    "boston": "BOS",
-    "washington": "IAD",
-    "atlanta": "ATL",
-    "denver": "DEN",
-    "las vegas": "LAS",
-    "orlando": "MCO",
-    "houston": "IAH",
-    "phoenix": "PHX",
-    "salt lake city": "SLC",
-    "portland": "PDX",
-    "austin": "AUS",
-    "nashville": "BNA",
-    "charlotte": "CLT",
-    "raleigh": "RDU",
-    "pittsburgh": "PIT",
-    "cleveland": "CLE",
-    "cincinnati": "CVG",
-    "indianapolis": "IND",
-    "columbus": "CMH",
-    "detroit": "DTW",
-    "milwaukee": "MKE",
-    "minneapolis": "MSP",
-    "kansas city": "MCI",
-    "omaha": "OMA",
-    "wichita": "ICT",
-    "oklahoma city": "OKC",
-    "tulsa": "TUL",
-    "albuquerque": "ABQ",
-    "el paso": "ELP",
-    "san antonio": "SAT",
-    "corpus christi": "CRP",
-    "lubbock": "LBB",
-    "wichita falls": "SPS",
-    "amarillo": "AMA",
-    "odessa": "MAF",
-    "midland": "MAF",
-    "san angelo": "SJT",
-    "abilene": "ABI",
-    "tyler": "TYR",
-    "longview": "GGG",
-    "texarkana": "TXK",
-    "shreveport": "SHV",
-    "baton rouge": "BTR",
-    "new orleans": "MSY",
-    "jackson": "JAN",
-    "biloxi": "GPT",
-    "mobile": "MOB",
-    "pensacola": "PNS",
-    "tallahassee": "TLH",
-    "savannah": "SAV",
-    "charleston": "CHS",
-    "myrtle beach": "MYR",
-    "wilmington": "ILM",
-    "greensboro": "GSO",
-    "winston salem": "INT",
-    "fayetteville": "FAY",
-    "asheville": "AVL",
-    "huntsville": "HSV",
-    "birmingham al": "BHM",
-    "montgomery": "MGM",
-    "tucson": "TUS",
-    "yuma": "NYL",
-    "flagstaff": "FLG",
-    "grand canyon": "GCN",
-    "page": "PGA",
-    "kingman": "IGM",
-    "lake havasu city": "HII",
-    "bullhead city": "IFP",
-    "prescott": "PRC",
-    "show low": "SOW",
-    "farmington": "FMN",
-    "durango": "DRO",
-    "cortez": "CEZ",
-    "montrose": "MTJ",
-    "grand junction": "GJT",
-    "glenwood springs": "GWS",
-    "aspen": "ASE",
-    "vail": "EGE",
-    "breckenridge": "QKB",
-    "steamboat springs": "HDN",
-    "fort collins": "FNL",
-    "greeley": "GXY",
-    "pueblo": "PUB",
-    "colorado springs": "COS",
-    "santa fe": "SAF",
-    "roswell": "ROW",
-    "carlsbad": "CNM",
-    "hobbs": "HOB",
-    "clovis": "CVN",
-    "portales": "PRZ",
-    "silver city": "SVC",
-    "deming": "DMN",
-    "las cruces": "LRU",
-    "truth or consequences": "TCS",
-    "socorro": "ONM",
-    "gallup": "GUP",
-    "zuni pueblo": "ZUN",
-    "window rock": "RQE",
-    "chinle": "E91",
-    "crownpoint": "0E8",
-    "shiprock": "5V5",
-    "casper": "CPR",
-    "cheyenne": "CYS",
-    "laramie": "LAR",
-    "rawlins": "RWL",
-    "rock springs": "RKS",
-    "evanston": "EVW",
-    "heber city": "W103",
-    "park city": "W104",
-    "midway": "W105",
-    "kamas": "W106",
-    "roosevelt": "W107",
-    "duchesne": "W108",
-    "altamont": "W109",
-    "tabiona": "W110",
-    "fruitland": "W111",
-    "neola": "W112",
-    "lapoint": "W113",
-    "jensen": "W114",
-    "vernal": "W115",
-    "dutch john": "W116",
-    "manila": "W117",
-    "cedar city": "CDC",
-    "bryce canyon": "BCE",
-    "valle": "VLE",
-    "taylor": "TYZ",
-    "holbrook": "HBK",
-    "grants": "GNT",
-    "los alamos": "LAM",
-    "los lunas": "LUA",
-    "double eagle ii": "AEG",
-    "conchas lake": "CNX",
-    "newkirk": "W148",
-    "ponca city": "PNC",
-    "blackwell": "BWL",
-    "pawhuska": "H76",
-    "bartlesville": "BVO",
-    "nowata": "H66",
-    "coffeeyville": "CFV",
-    "independence": "IDP",
-    "parsons": "PPF",
-    "chanute": "CNU",
-    "fort scott": "FSK",
-    "garnett": "K68",
-    "osage city": "53K",
-    "ottawa": "OWI",
-    "wellsville": "K68",
-    "lawrence": "LWC",
-    "topeka": "FOE",
-    "gardner": "K34",
-    "new century": "JCI",
-    "johnson county": "OJC",
-    "olathe": "JCI",
-    "bonner springs": "W149",
-    "de soto": "W150",
-    "eudora": "W151",
-    "lincolnville": "W152",
-    "mc louth": "W153",
-    "osawatomie": "W154",
-    "paola": "W155",
-    "tonganoxie": "W156",
-    "troy": "W157",
-    "wathena": "W158",
-    "weston": "W159",
-    "winchester": "W160",
-    "basehor": "W161",
-    "bendena": "W162",
-    "denison": "W163",
-    "effingham": "W164",
-    "everest": "W165",
-    "fairfax": "W166",
-    "fanning": "W167",
-    "graham": "W168",
-    "haden": "W169",
-    "helena": "W170",
-    "holton": "W171",
-    "horton": "W172",
-    "lancaster": "W173",
-    "leona": "W174",
-    "mayetta": "W175",
-    "melvern": "W176",
-    "netawaka": "W177",
-    "norcatur": "W178",
-    "onaga": "W179",
-    "overbrook": "W180",
-    "powhattan": "W181",
-    "quenemo": "W182",
-    "reserve": "W183",
-    "rossville": "W184",
-    "sabetha": "W185",
-    "seneca": "W186",
-    "silver lake": "W187",
-    "soldier": "W188",
-    "talmage": "W189",
-    "verona": "W190",
-    "volkland": "W191",
-    "wakarusa": "W192",
-    "wetmore": "W193",
-    "whiting": "W194",
-    "williamsburg": "W195",
-    "auburn": "W196",
-    "burlingame": "W197",
-    "bushong": "W198",
-    "carbondale": "W199",
-    "cassoday": "W200",
-    "cedar point": "W201",
-    "council grove": "W202",
-    "dwight": "W203",
-    "emmett": "W204",
-    "florence": "W205"
-}
-
-def convert_city_to_airport(city_name: str) -> str:
-    """Convert city name to airport code, or return as-is if already an airport code"""
-    if not city_name:
-        return city_name
-
-    # If it's already 3 characters and uppercase, assume it's an airport code
-    if len(city_name) == 3 and city_name.isupper():
-        return city_name
-
-    # Look up in city mapping
-    city_lower = city_name.lower().strip()
-    airport_code = CITY_TO_AIRPORT.get(city_lower)
-
-    if airport_code:
-        return airport_code
-
-    # If not found, try to extract airport code from the string (e.g., "London (LHR)" -> "LHR")
-    airport_match = re.search(r'\(([A-Z]{3})\)', city_name.upper())
-    if airport_match:
-        return airport_match.group(1)
-
-    # If still not found, return the original (might be an airport code already)
-    return city_name.upper()
+# Note: get_flights_url is now in api.services
+# Import city mapping and utilities from separate modules  
+from api.constants import CITY_TO_AIRPORT
 
 app = FastAPI(
     title="🧠 FlyMind API",
@@ -477,206 +191,27 @@ app = FastAPI(
     ]
 )
 
+# Add security middleware (order matters - first added is last executed)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(APIKeyMiddleware)
+
 # Add CORS middleware for n8n and web integrations
+# Configuration loaded from api.config module
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Pydantic models for n8n-compatible responses
-class FlightResult(BaseModel):
-    """Flight result model optimized for n8n workflows"""
-    name: str = Field(..., description="Airline and flight number")
-    departure: str = Field(..., description="Departure time and date")
-    arrival: str = Field(..., description="Arrival time and date")
-    duration: str = Field(..., description="Flight duration")
-    stops: int = Field(..., description="Number of stops")
-    price: str = Field(..., description="Price in local currency")
-    delay: Optional[str] = Field(None, description="Delay information if any")
-
-class SearchResponse(BaseModel):
-    """Search response model for n8n compatibility"""
-    success: bool = Field(..., description="Whether the search was successful")
-    current_price: str = Field(..., description="Current price level")
-    total_flights: int = Field(..., description="Total number of flights found")
-    flights: List[FlightResult] = Field(..., description="List of flight results")
-    search_url: str = Field(..., description="Google Flights URL for manual verification")
-    timestamp: str = Field(..., description="Search timestamp")
-    error: Optional[str] = Field(None, description="Error message if search failed")
-
-class ErrorResponse(BaseModel):
-    """Error response model for n8n workflows"""
-    success: bool = Field(default=False, description="Always false for errors")
-    error: str = Field(..., description="Error message")
-    error_code: str = Field(..., description="Error code for programmatic handling")
-    timestamp: str = Field(..., description="Error timestamp")
-
-class FlightSegment(BaseModel):
-    """Individual flight segment for multi-city searches"""
-    origin: str = Field(..., description="Departure city or airport code")
-    destination: str = Field(..., description="Arrival city or airport code")
-    depart_date: date = Field(..., description="Departure date in YYYY-MM-DD format")
-
-class FlightSearchRequest(BaseModel):
-    """Flight search request model with multi-city and flexible dates support"""
-    trip_type: str = Field("round-trip", description="Trip type: round-trip, one-way, multi-city")
-    segments: Optional[List[FlightSegment]] = Field(None, description="Flight segments for multi-city trips")
-    # Legacy fields for backward compatibility
-    origin: Optional[str] = Field(None, description="Departure city or airport code")
-    destination: Optional[str] = Field(None, description="Arrival city or airport code")
-    depart_date: Optional[Union[date, str]] = Field(None, description="Departure date (YYYY-MM-DD) or flexible date")
-    return_date: Optional[Union[date, str]] = Field(None, description="Return date (YYYY-MM-DD) or flexible date")
-    adults: int = Field(1, description="Number of adult passengers", ge=1, le=9)
-    children: int = Field(0, description="Number of children", ge=0, le=8)
-    infants_seat: int = Field(0, description="Number of infants in seat", ge=0, le=4)
-    infants_lap: int = Field(0, description="Number of infants on lap", ge=0, le=4)
-    seat_class: str = Field("economy", description="Seat class")
-    max_stops: Optional[int] = Field(None, description="Maximum stops", ge=0, le=2)
-    fetch_mode: str = Field("local", description="Fetch mode")
-
-    @validator('trip_type')
-    def validate_trip_type(cls, v):
-        if v not in ['round-trip', 'one-way', 'multi-city']:
-            raise ValueError('Invalid trip type')
-        return v
-
-    def get_segments(self) -> List[FlightSegment]:
-        """Get flight segments based on trip type"""
-        if self.trip_type == "multi-city" and self.segments:
-            return self.segments
-        elif self.trip_type in ["round-trip", "one-way"] and self.origin and self.destination and self.depart_date:
-            # Parse flexible dates
-            depart_date_parsed = parse_flexible_date(self.depart_date)
-
-            # For backward compatibility, only return the outbound segment
-            segments = [FlightSegment(
-                origin=self.origin,
-                destination=self.destination,
-                depart_date=depart_date_parsed
-            )]
-            return segments
-        else:
-            raise ValueError("Invalid flight search configuration")
-
-class WebhookPayload(BaseModel):
-    """Webhook payload for external integrations"""
-    event: str = Field(..., description="Event type")
-    search_id: str = Field(..., description="Unique search identifier")
-    data: Dict[str, Any] = Field(..., description="Search results or error data")
-    timestamp: str = Field(..., description="Event timestamp")
-
-class PriceAlertRequest(BaseModel):
-    """Price alert creation request"""
-    trip_type: str = Field("one-way", description="Trip type: one-way, round-trip, multi-city")
-    origin: str = Field(..., description="Departure city or airport code")
-    destination: str = Field(..., description="Arrival city or airport code")
-    depart_date: Union[date, str] = Field(..., description="Departure date")
-    return_date: Optional[Union[date, str]] = Field(None, description="Return date for round-trip")
-    target_price: float = Field(..., description="Target price to alert on", gt=0)
-    currency: str = Field("SEK", description="Currency code (SEK, USD, EUR, GBP)")
-    email: str = Field(..., description="Email address for notifications")
-    notification_channels: List[str] = Field(["email"], description="Notification channels")
-
-    @validator('trip_type')
-    def validate_trip_type(cls, v):
-        if v not in ['one-way', 'round-trip', 'multi-city']:
-            raise ValueError('Invalid trip type')
-        return v
-
-    @validator('currency')
-    def validate_currency(cls, v):
-        if v not in ['SEK', 'USD', 'EUR', 'GBP']:
-            raise ValueError('Invalid currency')
-        return v
-
-class PriceAlertResponse(BaseModel):
-    """Price alert response"""
-    alert_id: str = Field(..., description="Unique alert identifier")
-    trip_type: str = Field(..., description="Trip type")
-    origin: str = Field(..., description="Departure city or airport code")
-    destination: str = Field(..., description="Arrival city or airport code")
-    depart_date: str = Field(..., description="Departure date")
-    return_date: Optional[str] = Field(None, description="Return date for round-trip")
-    target_price: float = Field(..., description="Target price to alert on")
-    currency: str = Field(..., description="Currency code")
-    email: str = Field(..., description="Email address for notifications")
-    notification_channels: List[str] = Field(..., description="Notification channels")
-    status: str = Field("active", description="Alert status")
-    created_at: str = Field(..., description="Creation timestamp")
-
-# Global variables for webhook management
-webhook_urls: List[str] = []
-search_history: Dict[str, Dict[str, Any]] = {}
-price_alerts: Dict[str, Dict[str, Any]] = {}
-
-def parse_flexible_date(date_input: Union[date, str], base_date: Optional[date] = None) -> date:
-    """
-    Parse flexible date strings into actual dates.
-
-    Supports formats like:
-    - "weekend": Next Saturday
-    - "±3 days": ±3 days from base_date
-    - "YYYY-MM-DD": Direct date string
-    - date object: Pass through
-    """
-    if isinstance(date_input, date):
-        return date_input
-
-    if isinstance(date_input, str):
-        # Try to parse as YYYY-MM-DD first
-        try:
-            return date.fromisoformat(date_input)
-        except ValueError:
-            pass
-
-        # Handle flexible date strings
-        today = base_date or date.today()
-
-        # Weekend (next Saturday)
-        if date_input.lower() == "weekend":
-            days_until_saturday = (5 - today.weekday()) % 7
-            if days_until_saturday == 0:
-                days_until_saturday = 7  # Next Saturday if today is Saturday
-            return today + timedelta(days=days_until_saturday)
-
-        # ±X days format
-        match = re.match(r'^([+-])(\d+)\s*days?$', date_input.lower())
-        if match:
-            sign, days = match.groups()
-            days = int(days)
-            if sign == '+':
-                return today + timedelta(days=days)
-            else:
-                return today - timedelta(days=days)
-
-        # Month name (e.g., "december", "january")
-        month_names = {
-            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
-        }
-        if date_input.lower() in month_names:
-            month = month_names[date_input.lower()]
-            year = today.year if month >= today.month else today.year + 1
-            return date(year, month, 1)
-
-        # Default to today if unrecognized
-        logger.warning(f"Unrecognized date format: {date_input}, using today")
-        return today
-
-    # Fallback
-    return date.today()
-
-def send_webhook_notification(webhook_url: str, payload: WebhookPayload):
-    """Send webhook notification to external service"""
-    import requests
-    try:
-        response = requests.post(webhook_url, json=payload.dict(), timeout=10)
-        logger.info(f"Webhook sent to {webhook_url}: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Failed to send webhook to {webhook_url}: {e}")
+# Database imports for persistent storage
+from api.database import (
+    create_search_history, get_search_history,
+    create_price_alert as db_create_price_alert, get_price_alert, get_all_active_alerts,
+    create_webhook, get_webhook, get_all_webhooks
+)
 
 # Global exception handlers for consistent error responses
 @app.exception_handler(HTTPException)
@@ -711,7 +246,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions with consistent format"""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    logger.error(
+        "Unhandled exception",
+        extra={
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "path": str(request.url),
+            "method": request.method,
+            "client_ip": request.client.host if request.client else None,
+        },
+        exc_info=True
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -719,7 +264,8 @@ async def global_exception_handler(request: Request, exc: Exception):
             "error": "Internal server error",
             "error_code": "INTERNAL_SERVER_ERROR",
             "timestamp": datetime.now().isoformat(),
-            "path": str(request.url)
+            "path": str(request.url),
+            "message": "An unexpected error occurred. Please try again later."
         }
     )
 
@@ -753,10 +299,11 @@ async def get_version():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.post("/search", response_model=SearchResponse, tags=["Flights"])
+@app.post("/search", tags=["Flights"])
 async def search_flights_endpoint(
     request: FlightSearchRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
 ):
     """
     Search for flights with n8n-compatible response format.
@@ -765,32 +312,222 @@ async def search_flights_endpoint(
     structured JSON responses that work well with n8n workflows.
     """
     try:
-        # Convert city names to airport codes
+        # Sanitize and validate inputs
         if hasattr(request, 'origin') and request.origin:
+            request.origin = sanitize_string_input(request.origin, max_length=100)
             request.origin = convert_city_to_airport(request.origin)
         if hasattr(request, 'destination') and request.destination:
+            request.destination = sanitize_string_input(request.destination, max_length=100)
             request.destination = convert_city_to_airport(request.destination)
+        
+        # Validate origin and destination are different
+        if request.origin and request.destination:
+            try:
+                validate_origin_destination(request.origin, request.destination)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        
+        # Validate passenger counts
+        try:
+            validate_passenger_counts(
+                request.adults, request.children,
+                request.infants_seat, request.infants_lap
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         # Get flight segments based on trip type
         segments = request.get_segments()
 
-        # For now, handle only single segment searches (backward compatibility)
-        # Multi-city support will be implemented in the next step
+        # Handle multi-city searches
         if len(segments) > 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Multi-city searches not yet implemented"
+            # For multi-city, we'll search each segment separately and combine results
+            # This is a simplified approach - in production, you'd want to search all segments together
+            all_flights = []
+            combined_price = 0
+            
+            for i, segment in enumerate(segments):
+                # Validate each segment
+                try:
+                    validate_date_not_past(segment.depart_date, f"Segment {i+1} departure date")
+                    validate_date_reasonable_future(segment.depart_date, max_days=365, field_name=f"Segment {i+1} departure date")
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid date in segment {i+1}: {str(e)}")
+                
+                # Convert city names to airport codes for each segment
+                origin_code = convert_city_to_airport(segment.origin)
+                dest_code = convert_city_to_airport(segment.destination)
+                origin_code = sanitize_airport_code(origin_code)
+                dest_code = sanitize_airport_code(dest_code)
+                
+                if not validate_airport_code(origin_code):
+                    raise HTTPException(status_code=400, detail=f"Invalid origin airport code in segment {i+1}: {segment.origin}")
+                if not validate_airport_code(dest_code):
+                    raise HTTPException(status_code=400, detail=f"Invalid destination airport code in segment {i+1}: {segment.destination}")
+                
+                # Search this segment
+                segment_params = {
+                    "origin": origin_code,
+                    "destination": dest_code,
+                    "depart_date": segment.depart_date.isoformat(),
+                    "return_date": None,
+                    "adults": request.adults,
+                    "children": request.children,
+                    "infants_in_seat": request.infants_seat,
+                    "infants_on_lap": request.infants_lap,
+                    "seat": request.seat_class,
+                    "max_stops": request.max_stops,
+                    "fetch_mode": request.fetch_mode
+                }
+                
+                segment_result = await asyncio.to_thread(search_flights, **segment_params)
+                
+                if segment_result and hasattr(segment_result, 'flights') and segment_result.flights:
+                    # Add segment info to flights
+                    for flight in segment_result.flights[:5]:  # Limit to top 5 per segment
+                        flight.segment_index = i
+                        flight.segment_route = f"{origin_code} → {dest_code}"
+                        all_flights.append(flight)
+            
+            # Create combined result
+            result = type('Result', (), {
+                'flights': all_flights,
+                'current_price': 'multi-city'
+            })()
+            
+            # Generate combined search URL
+            search_url = f"https://www.google.com/travel/flights?q=flights"
+            for segment in segments:
+                seg_origin = convert_city_to_airport(segment.origin)
+                seg_dest = convert_city_to_airport(segment.destination)
+                seg_origin = sanitize_airport_code(seg_origin)
+                seg_dest = sanitize_airport_code(seg_dest)
+                search_url += f"&origin={seg_origin}&destination={seg_dest}&departure_date={segment.depart_date.isoformat()}"
+            
+            # For multi-city, skip the single segment logic below
+            # Store search in history
+            search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{abs(hash(str(request.dict())))}"
+            # Convert request dict to JSON-serializable format
+            request_dict = request.dict()
+            # Convert date objects to strings
+            for key, value in request_dict.items():
+                if isinstance(value, date):
+                    request_dict[key] = value.isoformat()
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            for k, v in item.items():
+                                if isinstance(v, date):
+                                    item[k] = v.isoformat()
+            
+            # For multi-city, extract origin from first segment and destination from last segment
+            if not segments:
+                raise HTTPException(status_code=400, detail="Multi-city search requires at least one segment")
+            
+            first_segment = segments[0]
+            last_segment = segments[-1]
+            origin_for_db = convert_city_to_airport(first_segment.origin)
+            destination_for_db = convert_city_to_airport(last_segment.destination)
+            origin_for_db = sanitize_airport_code(origin_for_db)
+            destination_for_db = sanitize_airport_code(destination_for_db)
+            
+            # Ensure we have valid airport codes
+            if not origin_for_db or not destination_for_db:
+                raise HTTPException(status_code=400, detail="Could not convert city names to airport codes for multi-city search")
+            
+            depart_date_for_db = first_segment.depart_date.isoformat() if isinstance(first_segment.depart_date, date) else str(first_segment.depart_date)
+            
+            # Create search history with proper fields for multi-city
+            search_history_data = {
+                "id": search_id,
+                "origin": origin_for_db,
+                "destination": destination_for_db,
+                "depart_date": depart_date_for_db,
+                "return_date": None,
+                "adults": request.adults,
+                "children": request.children,
+                "seat_class": request.seat_class,
+                "fetch_mode": request.fetch_mode,
+                "request_data": request_dict,
+                "result_data": {
+                    "flights": [{'name': getattr(f, 'name', ''), 'departure': getattr(f, 'departure', ''),
+                                'arrival': getattr(f, 'arrival', ''), 'duration': getattr(f, 'duration', ''),
+                                'stops': getattr(f, 'stops', 0), 'price': getattr(f, 'price', ''),
+                                'delay': getattr(f, 'delay', None), 'segment_index': getattr(f, 'segment_index', None),
+                                'segment_route': getattr(f, 'segment_route', None)} for f in all_flights],
+                    "current_price": getattr(result, 'current_price', 'multi-city'),
+                    "total_flights": len(all_flights)
+                },
+                "timestamp": datetime.now()
+            }
+            db_search = SearchHistory(**search_history_data)
+            db.add(db_search)
+            db.commit()
+            db.refresh(db_search)
+            
+            # Return response for multi-city
+            response_data = SearchResponse(
+                success=True,
+                current_price=getattr(result, 'current_price', 'multi-city'),
+                total_flights=len(all_flights),
+                flights=[FlightResult(
+                    name=getattr(f, 'name', ''),
+                    departure=getattr(f, 'departure', ''),
+                    arrival=getattr(f, 'arrival', ''),
+                    duration=getattr(f, 'duration', ''),
+                    stops=getattr(f, 'stops', 0),
+                    price=getattr(f, 'price', ''),
+                    delay=getattr(f, 'delay', None),
+                    segment_index=getattr(f, 'segment_index', None),
+                    segment_route=getattr(f, 'segment_route', None)
+                ) for f in all_flights[:20]],
+                search_url=search_url,
+                timestamp=datetime.now().isoformat(),
+                search_id=search_id
             )
+            return response_data
+        else:
+            # Single segment search (original logic)
+            segment = segments[0]
 
-        segment = segments[0]
+            # Validate dates
+            validate_date_not_past(segment.depart_date, "Departure date")
+            validate_date_reasonable_future(segment.depart_date, max_days=365, field_name="Departure date")
+            
+            # For round-trip, check if there's a second segment (return)
+            return_date_obj = None
+            if request.trip_type == "round-trip" and request.return_date:
+                return_date_obj = parse_flexible_date(request.return_date)
+                validate_date_not_past(return_date_obj, "Return date")
+                validate_date_range(segment.depart_date, return_date_obj, "Return date")
+                validate_date_reasonable_future(return_date_obj, max_days=365, field_name="Return date")
 
-        # Convert request to search parameters
-        search_params = {
-            "origin": segment.origin.upper(),
-            "destination": segment.destination.upper(),
-            "depart_date": segment.depart_date.isoformat(),
-            "return_date": segments[1].depart_date.isoformat() if len(segments) > 1 else None,
-            "adults": request.adults,
+            # Convert city names to airport codes
+            origin_code = convert_city_to_airport(segment.origin)
+            dest_code = convert_city_to_airport(segment.destination)
+            origin_code = sanitize_airport_code(origin_code)
+            dest_code = sanitize_airport_code(dest_code)
+            
+            if not validate_airport_code(origin_code):
+                raise HTTPException(status_code=400, detail=f"Invalid origin airport code: {origin_code}")
+            if not validate_airport_code(dest_code):
+                raise HTTPException(status_code=400, detail=f"Invalid destination airport code: {dest_code}")
+            
+            # Validate origin and destination are different for single segment
+            try:
+                validate_origin_destination(origin_code, dest_code)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            # Convert request to search parameters
+            search_params = {
+                "origin": origin_code,
+                "destination": dest_code,
+                "depart_date": segment.depart_date.isoformat(),
+                "return_date": return_date_obj.isoformat() if return_date_obj else None,
+                "adults": request.adults,
             "children": request.children,
             "infants_in_seat": request.infants_seat,
             "infants_on_lap": request.infants_lap,
@@ -799,11 +536,27 @@ async def search_flights_endpoint(
             "fetch_mode": request.fetch_mode
         }
 
-        # Perform search in a separate thread to avoid asyncio conflicts
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(search_flights, **search_params)
-            result = future.result()
+        # Check cache first (cache for 5 minutes for same searches)
+        cache_key = generate_cache_key("flight_search", **search_params)
+        cached_result = await get_cached(cache_key)
+        
+        if cached_result:
+            logger.info(f"Cache hit for search: {cache_key}")
+            result = type('Result', (), cached_result)()
+        else:
+            # Perform search asynchronously in a thread pool
+            result = await asyncio.to_thread(search_flights, **search_params)
+            
+            # Cache the result (only cache successful searches)
+            if result and hasattr(result, 'flights'):
+                cache_data = {
+                    'flights': [{'name': getattr(f, 'name', ''), 'departure': getattr(f, 'departure', ''),
+                                'arrival': getattr(f, 'arrival', ''), 'duration': getattr(f, 'duration', ''),
+                                'stops': getattr(f, 'stops', 0), 'price': getattr(f, 'price', ''),
+                                'delay': getattr(f, 'delay', None)} for f in result.flights],
+                    'current_price': getattr(result, 'current_price', 'unknown')
+                }
+                await set_cached(cache_key, cache_data, ttl=300)  # 5 minutes
 
         # Generate search URL
         search_url = get_flights_url(
@@ -833,21 +586,26 @@ async def search_flights_endpoint(
             })
 
         # Create search ID for tracking
-        search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{request.origin}_{request.destination}"
+        # Use origin and destination from the converted codes, not from request (which might be city names)
+        search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{origin_code}_{dest_code}"
 
-        # Store in history
-        search_history[search_id] = {
-            "request": request.dict(),
-            "result": {
+        # Store in database
+        request_data = request.dict()
+        # Convert date objects to strings for JSON serialization
+        for key, value in request_data.items():
+            if isinstance(value, date):
+                request_data[key] = value.isoformat()
+        
+        result_data = {
                 "current_price": getattr(result, 'current_price', 'unknown'),
                 "total_flights": len(result.flights),
                 "flights": formatted_flights
-            },
-            "timestamp": datetime.now().isoformat()
         }
+        create_search_history(db, search_id, request_data, result_data)
 
         # Send webhooks in background
-        if webhook_urls:
+        webhooks = get_all_webhooks(db)
+        if webhooks:
             webhook_payload = WebhookPayload(
                 event="flight_search_completed",
                 search_id=search_id,
@@ -859,18 +617,26 @@ async def search_flights_endpoint(
                 timestamp=datetime.now().isoformat()
             )
 
-            for webhook_url in webhook_urls:
-                background_tasks.add_task(send_webhook_notification, webhook_url, webhook_payload)
+            for webhook in webhooks:
+                background_tasks.add_task(send_webhook_notification, webhook.url, webhook_payload.dict())
+                # Update last_used_at
+                webhook.last_used_at = datetime.utcnow()
+                db.commit()
 
-        return SearchResponse(
+        response_data = SearchResponse(
             success=True,
             current_price=getattr(result, 'current_price', 'unknown'),
             total_flights=len(result.flights),
             flights=formatted_flights,
             search_url=search_url,
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
+            search_id=search_id
         )
+        return response_data
 
+    except HTTPException:
+        # Re-raise HTTPExceptions (like validation errors) as-is
+        raise
     except FlightSearchError as e:
         logger.error(f"Flight search error: {e}")
         error_response = ErrorResponse(
@@ -894,59 +660,124 @@ async def search_flights_endpoint(
         )
 
 @app.get("/search/{search_id}", tags=["Flights"])
-async def get_search_result(search_id: str):
+async def get_search_result(search_id: str, db: Session = Depends(get_db)):
     """Retrieve previous search results by ID"""
-    if search_id not in search_history:
+    search = get_search_history(db, search_id)
+    if not search:
         raise HTTPException(status_code=404, detail="Search not found")
 
-    return search_history[search_id]
+    return {
+        "request": search.request_data,
+        "result": search.result_data,
+        "timestamp": search.timestamp.isoformat()
+    }
 
 @app.post("/webhooks", tags=["Webhooks"])
-async def register_webhook(webhook_url: str = Form(...)):
-    """Register a webhook URL for notifications"""
-    if webhook_url not in webhook_urls:
-        webhook_urls.append(webhook_url)
+async def register_webhook(request: Request, db: Session = Depends(get_db)):
+    """Register a webhook URL for notifications (supports both Form and JSON)"""
+    try:
+        # Try to get from JSON body first
+        try:
+            body = await request.json()
+            webhook_url = body.get("webhook_url")
+        except:
+            # Fall back to form data
+            form_data = await request.form()
+            webhook_url = form_data.get("webhook_url")
+        
+        if not webhook_url:
+            raise HTTPException(status_code=400, detail="webhook_url parameter required")
+        
+        # Sanitize webhook URL
+        webhook_url = sanitize_string_input(webhook_url, max_length=500)
+        
+        # Basic URL validation
+        if not webhook_url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="Invalid webhook URL format")
+        
+        existing = get_webhook(db, webhook_url)
+        if existing:
+            return {"message": "Webhook already registered"}
+        
+        # Create webhook with ID = URL (for uniqueness)
+        webhook_id = webhook_url[:200]  # Limit ID length
+        create_webhook(db, webhook_id, webhook_url)
         logger.info(f"Registered webhook: {webhook_url}")
         return {"message": "Webhook registered successfully"}
-    else:
-        return {"message": "Webhook already registered"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering webhook: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to register webhook: {str(e)}")
 
 @app.delete("/webhooks", tags=["Webhooks"])
-async def unregister_webhook(webhook_url: str):
+async def unregister_webhook(webhook_url: str, db: Session = Depends(get_db)):
     """Unregister a webhook URL"""
-    if webhook_url in webhook_urls:
-        webhook_urls.remove(webhook_url)
-        logger.info(f"Unregistered webhook: {webhook_url}")
-        return {"message": "Webhook unregistered successfully"}
-    else:
+    webhook = get_webhook(db, webhook_url)
+    if not webhook:
         return {"message": "Webhook not found"}
+    
+    webhook.active = False
+    db.commit()
+    logger.info(f"Unregistered webhook: {webhook_url}")
+    return {"message": "Webhook unregistered successfully"}
 
 @app.get("/webhooks", tags=["Webhooks"])
-async def list_webhooks():
+async def list_webhooks(db: Session = Depends(get_db)):
     """List all registered webhooks"""
-    return {"webhooks": webhook_urls}
+    webhooks = get_all_webhooks(db)
+    return {"webhooks": [webhook.url for webhook in webhooks]}
 
 @app.post("/alerts", response_model=PriceAlertResponse, tags=["Price Alerts"])
-async def create_price_alert(request: PriceAlertRequest):
+async def create_price_alert(request: PriceAlertRequest, db: Session = Depends(get_db)):
     """Create a new price alert for flight monitoring"""
     try:
+        # Sanitize inputs
+        request.origin = sanitize_string_input(request.origin, max_length=100)
+        request.destination = sanitize_string_input(request.destination, max_length=100)
+        request.email = sanitize_string_input(request.email, max_length=255)
+        
+        # Validate email
+        if not validate_email(request.email):
+            raise HTTPException(status_code=400, detail=f"Invalid email format: {request.email}")
+        
         # Convert city names to airport codes
         origin_code = convert_city_to_airport(request.origin)
         destination_code = convert_city_to_airport(request.destination)
+        
+        # Validate origin and destination are different
+        try:
+            validate_origin_destination(origin_code, destination_code)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         # Parse the departure date
         depart_date_parsed = parse_flexible_date(request.depart_date)
+        
+        # Validate dates
+        validate_date_not_past(depart_date_parsed, "Departure date")
+        validate_date_reasonable_future(depart_date_parsed, max_days=365, field_name="Departure date")
 
         # Parse return date if provided
         return_date_parsed = None
         if request.return_date:
             return_date_parsed = parse_flexible_date(request.return_date)
+            validate_date_not_past(return_date_parsed, "Return date")
+            validate_date_range(depart_date_parsed, return_date_parsed, "Return date")
+            validate_date_reasonable_future(return_date_parsed, max_days=365, field_name="Return date")
+        
+        # Validate airport codes
+        if not validate_airport_code(origin_code):
+            raise HTTPException(status_code=400, detail=f"Invalid origin airport code: {origin_code}")
+        if not validate_airport_code(destination_code):
+            raise HTTPException(status_code=400, detail=f"Invalid destination airport code: {destination_code}")
 
         # Generate unique alert ID
         alert_id = f"alert_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{origin_code}_{destination_code}"
 
         # Create alert data
         alert_data = {
+            "id": alert_id,
             "alert_id": alert_id,
             "trip_type": request.trip_type,
             "origin": origin_code,
@@ -957,17 +788,32 @@ async def create_price_alert(request: PriceAlertRequest):
             "currency": request.currency,
             "email": request.email,
             "notification_channels": request.notification_channels,
-            "status": "active",
-            "created_at": datetime.now().isoformat()
+            "status": "active"
         }
 
-        # Store the alert
-        price_alerts[alert_id] = alert_data
+        # Store the alert in database
+        db_alert = db_create_price_alert(db, alert_data)
 
         logger.info(f"Created {request.trip_type} price alert: {alert_id} for {origin_code} → {destination_code}")
 
-        return PriceAlertResponse(**alert_data)
+        return PriceAlertResponse(
+            alert_id=db_alert.alert_id,
+            trip_type=db_alert.trip_type,
+            origin=db_alert.origin,
+            destination=db_alert.destination,
+            depart_date=db_alert.depart_date,
+            return_date=db_alert.return_date,
+            target_price=db_alert.target_price,
+            currency=db_alert.currency,
+            email=db_alert.email,
+            notification_channels=db_alert.notification_channels,
+            status=db_alert.status,
+            created_at=db_alert.created_at.isoformat()
+        )
 
+    except HTTPException:
+        # Re-raise HTTPExceptions (like validation errors) as-is
+        raise
     except Exception as e:
         logger.error(f"Error creating price alert: {e}")
         raise HTTPException(
@@ -976,41 +822,47 @@ async def create_price_alert(request: PriceAlertRequest):
         )
 
 @app.get("/alerts", tags=["Price Alerts"])
-async def list_price_alerts():
+async def list_price_alerts(db: Session = Depends(get_db)):
     """List all active price alerts"""
-    alerts_list = []
-    for alert_id, alert_data in price_alerts.items():
-        if alert_data.get("status") == "active":
-            alerts_list.append(PriceAlertResponse(**alert_data))
+    alerts = get_all_active_alerts(db)
+    
+    alerts_list = [
+        PriceAlertResponse(
+            alert_id=alert.alert_id,
+            trip_type=alert.trip_type,
+            origin=alert.origin,
+            destination=alert.destination,
+            depart_date=alert.depart_date,
+            return_date=alert.return_date,
+            target_price=alert.target_price,
+            currency=alert.currency,
+            email=alert.email,
+            notification_channels=alert.notification_channels,
+            status=alert.status,
+            created_at=alert.created_at.isoformat()
+        )
+        for alert in alerts
+    ]
 
     return {"alerts": [alert.dict() for alert in alerts_list]}
 
 @app.delete("/alerts/{alert_id}", tags=["Price Alerts"])
-async def delete_price_alert(alert_id: str):
+async def delete_price_alert(alert_id: str, db: Session = Depends(get_db)):
     """Delete a price alert by ID"""
-    if alert_id not in price_alerts:
+    alert = get_price_alert(db, alert_id)
+    if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
     # Mark as inactive instead of deleting (for audit purposes)
-    price_alerts[alert_id]["status"] = "inactive"
-    price_alerts[alert_id]["deleted_at"] = datetime.now().isoformat()
+    alert.status = "inactive"
+    alert.deleted_at = datetime.utcnow()
+    db.commit()
 
     logger.info(f"Deleted price alert: {alert_id}")
 
     return {"message": "Alert deleted successfully"}
 
-class NaturalLanguageQuery(BaseModel):
-    """Natural language flight search query"""
-    query: str = Field(..., description="Natural language flight search query", min_length=3, max_length=500)
-    provider: str = Field("openai", description="AI provider: openai, google, deepseek")
-    api_key: Optional[str] = Field(None, description="API key (optional if set in environment)")
-    model: Optional[str] = Field(None, description="Model name (optional, uses default for provider)")
-
-    @validator('provider')
-    def validate_provider(cls, v):
-        if v not in ['openai', 'google', 'deepseek']:
-            raise ValueError('Invalid AI provider')
-        return v
+# NaturalLanguageQuery is now in api.models
 
 def call_ai_provider(provider: str, prompt: str, api_key: str, model: Optional[str] = None) -> str:
     """Call the specified AI provider with the given prompt"""
@@ -1096,9 +948,12 @@ async def ai_flight_search(request: NaturalLanguageQuery):
 
         api_key = request.api_key or os.getenv(env_var_map.get(request.provider, ""))
         if not api_key:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{request.provider.upper()} API key required. Set {env_var_map[request.provider]} environment variable or provide in request."
+            # Return a graceful error instead of failing
+            return ErrorResponse(
+                success=False,
+                error=f"{request.provider.upper()} API key required. Set {env_var_map.get(request.provider, 'API_KEY')} environment variable or provide in request.",
+                error_code="AI_API_KEY_MISSING",
+                timestamp=datetime.now().isoformat()
             )
 
         # Create the parsing prompt
@@ -1246,11 +1101,8 @@ async def ai_flight_search(request: NaturalLanguageQuery):
             "fetch_mode": search_request.fetch_mode
         }
 
-        # Perform search in a separate thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(search_flights, **search_params)
-            result = future.result()
+        # Perform search asynchronously in a thread pool
+        result = await asyncio.to_thread(search_flights, **search_params)
 
         # Generate search URL
         search_url = get_flights_url(
@@ -1305,6 +1157,14 @@ async def ai_flight_search(request: NaturalLanguageQuery):
             status_code=500,
             detail=f"AI-powered search failed: {str(e)}"
         )
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on application startup."""
+    init_db()
+    logger.info("✅ Database initialized")
+
 
 if __name__ == "__main__":
     # Simple startup test

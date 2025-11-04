@@ -15,27 +15,43 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+# Note: Build from repository root (not api/) for this to work correctly
+COPY api/requirements.txt ./requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
+# Copy application code
+# Build context should be the repository root, not api/
+# This ensures both api/ and flights/ directories are available
+COPY api/ ./api/
+COPY flights/ ./flights/
+
+# Install fast_flights from local directory
+RUN pip install -e ./flights
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash app
+
+# Set PYTHONPATH to ensure Python can find the flights package
+ENV PYTHONPATH=/app
+
+# Install Playwright browsers as root (needs system permissions)
 RUN playwright install chromium
 
-# Copy application code
-COPY . .
+# Change ownership to non-root user
+RUN chown -R app:app /app
 
-# Create non-root user (but run as root for Railway compatibility)
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-# USER app  # Temporarily run as root for debugging
+# Switch to non-root user
+# Note: Railway supports non-root users, but if you encounter permission issues,
+# you can temporarily comment out the USER line
+USER app
 
 # Expose port
-EXPOSE 8001
+EXPOSE 8000
 
 # Health check (removed curl dependency)
 # Railway will use the healthcheckPath from railway.json
 
-# Start the application with logging
-CMD uvicorn api:app --host 0.0.0.0 --port ${PORT:-8001} --log-level info
+# Start the FastAPI app dynamically for Railway
+CMD ["sh", "-c", "uvicorn api.api:app --host 0.0.0.0 --port ${PORT:-8000} --log-level info"]
