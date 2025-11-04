@@ -34,9 +34,8 @@ USER app
 # Expose port
 EXPOSE 8001
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
+# Health check (removed curl dependency)
+# Railway will use the healthcheckPath from railway.json
 
 # Start the application
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8001"]
