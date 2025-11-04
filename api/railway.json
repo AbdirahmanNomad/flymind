@@ -4,7 +4,7 @@
     "buildCommand": "pip install -r requirements.txt && playwright install chromium"
   },
   "deploy": {
-    "startCommand": "uvicorn api:app --host 0.0.0.0 --port $PORT --log-level info",
+    "startCommand": "python api/api.py",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
