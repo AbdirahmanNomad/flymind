@@ -26,10 +26,10 @@ RUN playwright install chromium
 # Copy application code
 COPY . .
 
-# Create non-root user
+# Create non-root user (but run as root for Railway compatibility)
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
-USER app
+# USER app  # Temporarily run as root for debugging
 
 # Expose port
 EXPOSE 8001
@@ -37,5 +37,5 @@ EXPOSE 8001
 # Health check (removed curl dependency)
 # Railway will use the healthcheckPath from railway.json
 
-# Start the application
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8001"]
+# Start the application with logging
+CMD uvicorn api:app --host 0.0.0.0 --port ${PORT:-8001} --log-level info
