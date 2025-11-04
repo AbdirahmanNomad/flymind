@@ -39,14 +39,29 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 # Import our flight search functionality
-from flights.fast_flights.core import get_flights
-from flights.fast_flights.flights_impl import FlightData, Passengers
-from typing import Optional, Literal
+try:
+    from flights.fast_flights.core import get_flights
+    from flights.fast_flights.flights_impl import FlightData, Passengers
+    from typing import Optional, Literal
 
-# Define FlightSearchError for compatibility
-class FlightSearchError(Exception):
-    """Custom exception for flight search errors"""
-    pass
+    # Define FlightSearchError for compatibility
+    class FlightSearchError(Exception):
+        """Custom exception for flight search errors"""
+        pass
+
+    FLIGHTS_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Flight search module not available: {e}")
+    FLIGHTS_AVAILABLE = False
+    # Define dummy classes for when flights module is not available
+    class FlightData:
+        pass
+    class Passengers:
+        pass
+    class FlightSearchError(Exception):
+        pass
+    def get_flights(*args, **kwargs):
+        raise FlightSearchError("Flight search not available")
 
 def search_flights(
     origin: str,
@@ -1292,5 +1307,11 @@ async def ai_flight_search(request: NaturalLanguageQuery):
         )
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Simple startup test
+    print("🚀 Starting FlyMind API...")
+    print(f"📦 Flights module available: {FLIGHTS_AVAILABLE}")
+    port = int(os.getenv("PORT", 8001))
+    print(f"📡 Listening on port {port}")
+    print("🏥 Health check available at: /health")
+    print("📖 API docs available at: /docs")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
