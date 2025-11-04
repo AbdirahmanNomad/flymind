@@ -152,6 +152,11 @@ logs/
 *.tmp
 *.temp
 
+# Debug and test files
+debug_screenshot.png
+test_features.py
+streamlit_enhanced.py
+
 # Playwright
 test-results/
 playwright-report/
@@ -166,6 +171,8 @@ node_modules/
 *.db
 *.sqlite
 *.sqlite3
+flymind.db
+test.db
 
 # Secrets and keys
 secrets/
