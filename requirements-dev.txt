@@ -1,0 +1,38 @@
+# Development and testing dependencies for FlyMind
+# Install with: pip install -r requirements-dev.txt
+
+# Core dependencies (also in api/requirements.txt)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+streamlit>=1.28.0
+requests>=2.31.0
+
+# Development tools
+black>=23.0.0          # Code formatting
+isort>=5.12.0          # Import sorting
+flake8>=6.0.0          # Linting
+mypy>=1.7.0            # Type checking
+pre-commit>=3.5.0      # Pre-commit hooks
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0      # Coverage reporting
+pytest-asyncio>=0.21.0 # Async testing
+httpx>=0.25.0         # HTTP client for testing
+
+# Security and quality
+bandit>=1.7.0         # Security scanning
+safety>=2.3.0         # Vulnerability checking
+
+# Documentation
+mkdocs>=1.5.0         # Documentation generator
+mkdocs-material>=9.4.0 # Material theme for docs
+
+# Optional: Development server
+watchdog>=3.0.0       # File watching for auto-reload
+
+# Optional: Jupyter for data exploration
+jupyter>=1.0.0
+pandas>=2.1.0
+matplotlib>=3.8.0
