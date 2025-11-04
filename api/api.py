@@ -39,7 +39,122 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 # Import our flight search functionality
-from flights import search_flights, FlightSearchError, get_flights_url
+from flights.fast_flights.core import get_flights
+from flights.fast_flights.flights_impl import FlightData, Passengers
+from typing import Optional, Literal
+
+# Define FlightSearchError for compatibility
+class FlightSearchError(Exception):
+    """Custom exception for flight search errors"""
+    pass
+
+def search_flights(
+    origin: str,
+    destination: str,
+    depart_date: str,
+    return_date: Optional[str] = None,
+    adults: int = 1,
+    children: int = 0,
+    infants_in_seat: int = 0,
+    infants_on_lap: int = 0,
+    seat: Literal["economy", "premium-economy", "business", "first"] = "economy",
+    max_stops: Optional[int] = None,
+    fetch_mode: Literal["common", "fallback", "force-fallback", "local", "bright-data"] = "local"
+):
+    """Search for flights using the fast_flights library"""
+    try:
+        # Prepare flight data
+        flight_data = [
+            FlightData(
+                from_airport=origin,
+                to_airport=destination,
+                date=depart_date
+            )
+        ]
+
+        # Add return flight if round trip
+        trip_type: Literal["round-trip", "one-way", "multi-city"] = "one-way"
+        if return_date:
+            flight_data.append(FlightData(
+                from_airport=destination,
+                to_airport=origin,
+                date=return_date
+            ))
+            trip_type = "round-trip"
+
+        # Prepare passengers
+        passengers = Passengers(
+            adults=adults,
+            children=children,
+            infants_in_seat=infants_in_seat,
+            infants_on_lap=infants_on_lap
+        )
+
+        # Search flights
+        result = get_flights(
+            flight_data=flight_data,
+            trip=trip_type,
+            passengers=passengers,
+            seat=seat,
+            fetch_mode=fetch_mode,
+            max_stops=max_stops
+        )
+
+        # Convert result to expected format
+        if result and hasattr(result, 'flights'):
+            return type('Result', (), {
+                'flights': result.flights,
+                'current_price': getattr(result, 'current_price', 'unknown')
+            })()
+        else:
+            return type('Result', (), {
+                'flights': [],
+                'current_price': 'unknown'
+            })()
+
+    except Exception as e:
+        raise FlightSearchError(f"Flight search failed: {str(e)}")
+
+def get_flights_url(
+    origin: str,
+    destination: str,
+    depart_date: str,
+    return_date: Optional[str] = None,
+    adults: int = 1,
+    children: int = 0,
+    infants_in_seat: int = 0,
+    infants_on_lap: int = 0,
+    seat: str = "economy",
+    max_stops: Optional[int] = None
+) -> str:
+    """Generate Google Flights URL for search parameters"""
+    base_url = "https://www.google.com/travel/flights"
+
+    # Build search parameters
+    params = [
+        f"q=flights",
+        f"origin={origin}",
+        f"destination={destination}",
+        f"departure_date={depart_date}",
+        f"adults={adults}",
+        f"children={children}",
+        f"infants_in_seat={infants_in_seat}",
+        f"infants_on_lap={infants_on_lap}",
+        f"seat={seat}"
+    ]
+
+    if return_date:
+        params.append(f"return_date={return_date}")
+
+    if max_stops is not None:
+        if max_stops == 0:
+            params.append("stops=nonstop")
+        elif max_stops == 1:
+            params.append("stops=1")
+        elif max_stops == 2:
+            params.append("stops=2")
+
+    return f"{base_url}?{'&'.join(params)}"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
