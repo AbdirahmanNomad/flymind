@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import json
 import re
+import os
 from datetime import datetime, timedelta
 
 def parse_price(price_str):
@@ -165,8 +166,15 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# API Configuration
-API_BASE_URL = st.sidebar.text_input("API Base URL", "http://localhost:8001", help="URL of your Google Flights API server")
+# API Configuration - Auto-detect environment
+if 'STREAMLIT_SERVER_HEADLESS' in os.environ:
+    # Running on Streamlit Cloud - use deployed API
+    default_api_url = "https://your-deployed-api-url.flymind.com"  # Replace with your actual deployed API URL
+else:
+    # Running locally
+    default_api_url = "http://localhost:8001"
+
+API_BASE_URL = st.sidebar.text_input("API Base URL", default_api_url, help="URL of your Google Flights API server")
 
 # API Health Status
 st.sidebar.markdown("### 🔍 API Status")
