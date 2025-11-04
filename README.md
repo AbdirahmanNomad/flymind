@@ -50,8 +50,8 @@ With **FastAPI**, **Streamlit**, and **Playwright**, FlyMind delivers the perfor
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd google-flights-api
+git clone https://github.com/AbdirahmanNomad/flymind.git
+cd flymind
 
 # Install dependencies
 pip install -r api/requirements.txt
