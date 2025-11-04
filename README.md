@@ -486,9 +486,9 @@ copies or substantial portions of the Software.
 ## 🆘 Support & Community
 
 - **📖 Documentation**: [API Docs](http://localhost:8001/docs)
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/your-repo/issues)
-- **💬 Discussions**: [GitHub Discussions](https://github.com/your-repo/discussions)
-- **📧 Email**: support@flightfinder.dev
+- **🐛 Bug Reports**: [GitHub Issues](https://github.com/AbdirahmanNomad/flymind/issues)
+- **💬 Discussions**: [GitHub Discussions](https://github.com/AbdirahmanNomad/flymind/discussions)
+- **📧 Email**: Contact via [GitHub Issues](https://github.com/AbdirahmanNomad/flymind/issues)
 
 ### Community
 
