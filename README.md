@@ -133,7 +133,7 @@ POST /webhooks
 Content-Type: application/json
 
 {
-  "webhook_url": "https://your-n8n-webhook-url"
+  "webhook_url": "https://your-app.com/webhook/flight-alerts"
 }
 ```
 
